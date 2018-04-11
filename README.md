@@ -1,2 +1,4 @@
 # tk_wordlist
-Simple single-header API and packed datafile to lookup words for games, spellcheck, etc.
+Simple API and packed datafile to lookup words for games, spellcheck, etc.
+
+TODO: write readme..
