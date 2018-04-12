@@ -129,11 +129,4 @@ int main( int argc, char *argv[] )
 	LookupSomeWords( worddata );
 	GatherWordStats( worddata );
 
-	FILE *fpTest = fopen("testwords.txt", "wt");
-	WordList_Enumerator ee = WordList_MakeEnumerator( worddata );
-	char * word;
-	while ((word = WordList_NextWord( &ee )) ) {
-		fprintf( fpTest, "%s\n", word );
-	}
-
 }
