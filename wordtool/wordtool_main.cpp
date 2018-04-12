@@ -10,6 +10,9 @@ Usage:
 ./wordtool 2of12inf.txt gamedata/wordfile.dat
 */
 
+// For debugging, output a graph. Not useful with a lot of words.
+// Use "graphviz" to draw the graph, like this:
+//$ dot dbgtrie.dot -Tpng -o dbgtrie.png
 #define DEBUG_GRAPH (0)
 
 #define MEGABYTE (1024*1024)
@@ -29,15 +32,16 @@ struct TrieNode {
 	int numEdges;
 	TrieNode *edge[MAX_EDGES];
     
-    uint32_t hashcode;
+    uint64_t hashcode;
     int nodeCount;
     bool visited;
     int dupeCount;
+    bool dupeProcessed;
 };
 
 #define HASHTABLESIZE (11177)
 struct CountTableEntry {
-    uint32_t hashcode;
+    uint64_t hashcode;
     uint32_t nodeCount;
     TrieNode *node; // any one node that matches the hash code
     CountTableEntry *next;
@@ -141,7 +145,7 @@ void TrieNode_Print( TrieNode *curr, int depth )
     if (curr->numEdges==0) {
         leaf = " --> *";
     }
-    printf("%s%s%s #%08X\n", indent, curr->label, leaf, curr->hashcode );
+    printf("%s%s%s #%08llX\n", indent, curr->label, leaf, curr->hashcode );
 	for (int i=0; i < curr->numEdges; i++) {
         TrieNode_Print( curr->edge[i], depth+1 );
 	}
@@ -385,18 +389,19 @@ void AssignWordlistIndices( WordListNode *base, TrieNode *curr, int *highestInde
 }
 
 // Update the hash and count
-uint32_t TrieNode_UpdateHash( TrieNode *curr )
+uint64_t TrieNode_UpdateHash( TrieNode *curr )
 {
     // Hash is kind of dumb, just djb-hash the label and then add all of the child nodes
-    uint32_t hash = 5381;
+    uint64_t hash = 5381;
     for (char *ch=curr->label; *ch; ch++) {
         hash = ((hash << 5) + hash) + *ch;
     }
     curr->nodeCount = 1; // count ourself
     for (int i=0; i < curr->numEdges; i++) {
-        uint32_t edgeHash = TrieNode_UpdateHash( curr->edge[i] );
+        uint64_t edgeHash = TrieNode_UpdateHash( curr->edge[i] );
         curr->nodeCount += curr->edge[i]->nodeCount;
-        hash += edgeHash;
+        //hash += edgeHash;
+        hash = ((hash << 5) + hash) + edgeHash;
     }
     curr->hashcode = hash;
     return hash;
@@ -407,6 +412,31 @@ void TrieNode_ClearVisited( TrieNode *curr ) {
     for (int i=0; i < curr->numEdges; i++) {
         TrieNode_ClearVisited( curr->edge[i] );
     }
+}
+
+bool TrieNode_CompareSubtrees( TrieNode *left, TrieNode *right, int depth ) {
+    
+    //printf("CompareSubtrees %p %p -- depth %d\n", left, right, depth );
+
+    if (depth > MAX_WORD_LENGTH) {
+        printf("Max depth reached...\n");
+        exit(1);
+    }
+
+    if (strcmp( left->label, right->label)) {
+        return false;
+    }
+
+    if (left->numEdges != right->numEdges) {
+        return false;
+    }
+    for (int i=0; i < left->numEdges; i++) {
+        bool subtreesMatch = TrieNode_CompareSubtrees( left->edge[i], right->edge[i], depth+1 );
+        if (!subtreesMatch) {
+            return false;
+        }
+    }
+    return true;
 }
 
 uint32_t TrieNode_CountDupes( TrieNode *curr, TrieNode *target ) {
@@ -421,11 +451,13 @@ uint32_t TrieNode_CountDupes( TrieNode *curr, TrieNode *target ) {
     }
     
     
-    if (curr->hashcode == target->hashcode) {
-        count++;
+    if ((curr != target) && (curr->hashcode == target->hashcode)) {
+        // Make sure it's actually a dupe
+        if (TrieNode_CompareSubtrees( curr, target, 0)) {
+            count++;
+        }
         //printf("CountDupes: %d ( %d/%0X, %d/%0X)\n", count, curr->nodeId, curr->hashcode, target->nodeId,target->hashcode );
-    }
-    
+    }    
     
     return count;
 }
@@ -496,9 +528,13 @@ TrieNode *TrieNode_FindMostDuplicated2( CountTableEntry **countTable, TrieNode *
     CountTableEntry *bestEntry = NULL;
     for (int i=0; i < HASHTABLESIZE; i++) {
         CountTableEntry *ent = countTable[i];
+
         while (ent) {
             if ((!bestEntry) || (ent->nodeCount > bestEntry->nodeCount)) {
-                bestEntry = ent;
+                // Sort of a hack.. 
+                if (!ent->node->dupeProcessed) {
+                    bestEntry = ent;
+                }
             }
             ent = ent->next;
         }
@@ -506,6 +542,8 @@ TrieNode *TrieNode_FindMostDuplicated2( CountTableEntry **countTable, TrieNode *
     
     if (bestEntry) {
         bestEntry->node->dupeCount = bestEntry->nodeCount;
+        bestEntry->node->dupeProcessed = true;
+
         return bestEntry->node;
     } else {
         return NULL;
@@ -520,10 +558,13 @@ int TrieNode_ReplaceSubtree( TrieNode *curr, TrieNode *replacement ) {
     for (int i=0; i < curr->numEdges; i++) {
         count += TrieNode_ReplaceSubtree( curr->edge[i], replacement );
         
-        // self-replacment is harmless...
-        if (curr->edge[i]->hashcode == replacement->hashcode) {
-            curr->edge[i] = replacement;
-            count++;
+        if ((curr->edge[i] != replacement) && (curr->edge[i]->hashcode == replacement->hashcode)) {
+            if (TrieNode_CompareSubtrees( curr->edge[i], replacement, 0)) {
+                
+                // TODO: Release memory                
+                curr->edge[i] = replacement;
+                count++;
+            }
         }
     }
     return count;
@@ -544,25 +585,16 @@ int main( int argc, char *argv[] )
     const char *wordDataFile = argv[2];
 
     TrieNode *root = TrieNode_Alloc( "root" );
-
-#if DEBUG_GRAPH
-   // dot dbgtrie.dot -Tpng -o dbgtrie.png
-    FILE *fpGraph = fopen("/Users/joeld/oprojects/crossroads/dbgtrie.dot", "wt" );
-    fprintf( fpGraph,
-            "digraph blarg {\n"
-            "node [shape = circle];\n"
-            );
-#endif
     
     int count = 0;
     int rawsize = 0;
 
-#if 1
-    TrieNode_Insert( root, (char *)"team" );
-    TrieNode_Insert( root, (char *)"test" );
-    TrieNode_Insert( root, (char *)"teams" );
-    TrieNode_Insert( root, (char *)"aardvark" );
-    TrieNode_Insert( root, (char *)"aardwulf" );
+#if 0
+    // TrieNode_Insert( root, (char *)"team" );
+    // TrieNode_Insert( root, (char *)"test" );
+    // TrieNode_Insert( root, (char *)"teams" );
+    // TrieNode_Insert( root, (char *)"aardvark" );
+    // TrieNode_Insert( root, (char *)"aardwulf" );
     TrieNode_Insert( root, (char *)"zoo" );
     TrieNode_Insert( root, (char *)"zoos" );
     TrieNode_Insert( root, (char *)"zookeeper" );
@@ -574,17 +606,16 @@ int main( int argc, char *argv[] )
     
     TrieNode_Insert( root, (char *)"claw" );
 
-    TrieNode_Insert( root, (char *)"zomg" );
     TrieNode_Insert( root, (char *)"zinger" );
     TrieNode_Insert( root, (char *)"zings" );
     TrieNode_Insert( root, (char *)"zing" );
 
-    TrieNode_Insert( root, (char *)"troubador" );
+    TrieNode_Insert( root, (char *)"troubadour" );
 
     TrieNode_Insert( root, (char *)"bank" );
     TrieNode_Insert( root, (char *)"bing" );
     TrieNode_Insert( root, (char *)"bings" );
-    TrieNode_Insert( root, (char *)"binger" );
+    TrieNode_Insert( root, (char *)"binge" );
 
     TrieNode_Insert( root, (char *)"rodeo" );
     TrieNode_Insert( root, (char *)"ring" );
@@ -672,24 +703,30 @@ int main( int argc, char *argv[] )
     CountTableEntry ** countTable = (CountTableEntry**)malloc(sizeof(CountTableEntry*)*HASHTABLESIZE );
     memset( countTable, 0, sizeof(CountTableEntry*)*HASHTABLESIZE );
     
-    for (int i=0; i < 100; i++)
+    for (int i=0; i < 5000; i++)
     {
-        printf("FindMostDupes iter %d\n", i );
         //TrieNode *mostDupes = TrieNode_FindMostDuplicated( root, root );
         TrieNode *mostDupes = TrieNode_FindMostDuplicated2( countTable, root );
-        printf("Most Dupes %d(%s), count %d\n", mostDupes->nodeId, mostDupes->label, mostDupes->dupeCount);
+        printf("FindMostDupes iter %d: %d(%s), count %d\n", 
+            i, mostDupes->nodeId, mostDupes->label, mostDupes->dupeCount);
         if (mostDupes->dupeCount <= 1) {
             break;
         }
         
         int result = TrieNode_ReplaceSubtree( root, mostDupes );
-        printf("Replace dupes result %d\n", result );
+        //printf("Replace dupes result %d\n", result );
     }
     
 #if DEBUG_GRAPH
+    FILE *fpGraph = fopen("dbgtrie.dot", "wt" );
+    fprintf( fpGraph,
+            "digraph blarg {\n"
+            "node [shape = circle];\n"
+            );
     TrieNode_Graphviz( root, fpGraph );
     fprintf(fpGraph, "}\n");
     fclose(fpGraph );
+    return 1;
 #endif
     
     TrieStats stats = {};
