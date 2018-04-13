@@ -39091,6 +39091,8 @@ kaftan
 kaftans
 kaiser
 kaisers
+kakistocracy
+kakistocracies%
 kale
 kaleidoscope
 kaleidoscopes

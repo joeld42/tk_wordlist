@@ -16,6 +16,7 @@ void LookupSomeWords( WordListNode *worddata )
     const char *testWords[] = {
         "claw", "aardvark", "test", "rhino", "claws",
         "zzyzhaggis", "blarg", "teams", "troubadour",
+        "kakistocracy"
     };
     for (int i=0; i < sizeof(testWords) / sizeof(testWords[0]); i++ ) {
         
